@@ -12,7 +12,7 @@ An MCP (Model Context Protocol) server for the [Affinity CRM](https://www.affini
 
 ## Features
 
-- **36 Tools** for comprehensive Affinity access
+- **28 Tools** for comprehensive Affinity access
 - **Read-Only Focus** - All tools are read-only except note creation (safe for AI agents)
 - **Dual API Support** - Uses both V1 and V2 Affinity APIs for full functionality
 - **Field Data Access** - Complete field values, change history, and schema discovery
