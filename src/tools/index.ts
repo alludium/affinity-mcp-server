@@ -88,3 +88,25 @@ export {
   executeListPersonNotes,
   executeListOpportunityNotes
 } from './enhanced-details.js';
+
+// Field Values - Phase 5 (V1)
+export {
+  getFieldValuesToolDefinition,
+  getFieldValueChangesToolDefinition,
+  executeGetFieldValues,
+  executeGetFieldValueChanges
+} from './field-values.js';
+
+// Schema Discovery - Phase 6 (V1)
+export {
+  getPersonsFieldsToolDefinition,
+  getOrganizationsFieldsToolDefinition,
+  executeGetPersonsFields,
+  executeGetOrganizationsFields
+} from './schema-fields.js';
+
+// Network Intelligence - Phase 7 (V1)
+export {
+  getRelationshipStrengthsToolDefinition,
+  executeGetRelationshipStrengths
+} from './relationship-strengths.js';
