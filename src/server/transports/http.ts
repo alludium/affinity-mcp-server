@@ -26,7 +26,7 @@ export interface HttpTransportConfig {
  */
 export async function startHttpTransport(config: HttpTransportConfig): Promise<void> {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '1mb' }));
 
   // Optional Bearer token authentication
   if (config.authToken) {
@@ -58,8 +58,19 @@ export async function startHttpTransport(config: HttpTransportConfig): Promise<v
       transport.close();
     });
 
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error('MCP request error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null
+        });
+      }
+    }
   });
 
   // Handle GET and DELETE for session management (return 405 in stateless mode)

@@ -38,6 +38,10 @@ async function main(): Promise<void> {
 
     case 'http': {
       const port = parseInt(process.env.PORT || '3000', 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error(`Error: Invalid PORT value '${process.env.PORT}'. Must be a number between 1-65535.`);
+        process.exit(1);
+      }
       const authToken = process.env.MCP_AUTH_TOKEN;
       await startHttpTransport({ port, authToken });
       break;
