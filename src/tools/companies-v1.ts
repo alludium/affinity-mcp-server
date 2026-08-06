@@ -298,6 +298,38 @@ function formatSearchCompaniesResponse(
   }, null, 2);
 }
 
+function formatOversizedSingleCompanyResponse(
+  organization: V1Organization,
+  nextPageToken: string | null,
+  responseFormat: SearchCompaniesInput['responseFormat']
+): string {
+  const id = String(organization.id ?? '').slice(0, 256);
+  const name = String(organization.name ?? 'Unnamed company').slice(0, 512);
+
+  if (responseFormat === 'markdown') {
+    return [
+      '# Search Results: Companies',
+      '',
+      `## ${name}`,
+      id ? `**ID:** ${id}` : '',
+      '',
+      '*This company record exceeded the response limit. Use its ID with a company detail tool to read the full record.*',
+      ...(nextPageToken
+        ? ['', `*More results available. Use pageToken: \`${nextPageToken}\`*`]
+        : [])
+    ].filter(Boolean).join('\n');
+  }
+
+  return JSON.stringify({
+    companies: [{ id, name, truncated: true }],
+    count: 1,
+    hasMore: nextPageToken !== null,
+    nextPageToken,
+    truncated: true,
+    summary: 'The company record exceeded the response limit. Use its ID to read the full record.'
+  }, null, 2);
+}
+
 /**
  * Execute search companies tool
  *
@@ -307,6 +339,7 @@ export async function executeSearchCompanies(input: SearchCompaniesInput): Promi
   try {
     const client = getClientV1();
     let pageSize = input.pageSize ?? 100;
+    const deadlineAtMs = Date.now() + SEARCH_REQUEST_TIMEOUT_MS;
 
     for (;;) {
       // Build V1 API params (snake_case)
@@ -335,7 +368,8 @@ export async function executeSearchCompanies(input: SearchCompaniesInput): Promi
         params,
         {
           operation: 'search_companies',
-          timeoutMs: SEARCH_REQUEST_TIMEOUT_MS
+          timeoutMs: SEARCH_REQUEST_TIMEOUT_MS,
+          deadlineAtMs
         }
       );
 
@@ -347,12 +381,15 @@ export async function executeSearchCompanies(input: SearchCompaniesInput): Promi
         input.responseFormat
       );
 
-      if (
-        result.length <= CHARACTER_LIMIT ||
-        organizations.length <= 1 ||
-        pageSize === 1
-      ) {
+      if (result.length <= CHARACTER_LIMIT) {
         return result;
+      }
+      if (organizations.length <= 1 || pageSize === 1) {
+        return formatOversizedSingleCompanyResponse(
+          organizations[0],
+          nextPageToken,
+          input.responseFormat
+        );
       }
 
       // Re-fetch a smaller API page so any omitted records are represented by

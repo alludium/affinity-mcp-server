@@ -337,6 +337,35 @@ function formatCompanyNotesResponse(
   }, null, 2);
 }
 
+function formatOversizedSingleNoteResponse(
+  companyId: string,
+  note: V2Note,
+  nextCursor: string | null,
+  responseFormat: ListCompanyNotesInput['responseFormat']
+): string {
+  const id = String(note.id ?? '').slice(0, 256);
+
+  if (responseFormat === 'markdown') {
+    return [
+      `# Notes for Company ${companyId}`,
+      '',
+      `## Note ${id}`,
+      '',
+      '*This note exceeded the response limit. Its content was omitted so the MCP response remains valid.*',
+      ...(nextCursor ? ['', `*More notes available. Use cursor: \`${nextCursor}\`*`] : [])
+    ].join('\n');
+  }
+
+  return JSON.stringify({
+    notes: [{ id, contentTruncated: true }],
+    count: 1,
+    hasMore: nextCursor !== null,
+    nextCursor,
+    truncated: true,
+    summary: 'The note exceeded the response limit, so its content was omitted.'
+  }, null, 2);
+}
+
 /**
  * Execute list company notes tool
  *
@@ -371,8 +400,16 @@ export async function executeListCompanyNotes(input: ListCompanyNotesInput): Pro
         input.responseFormat
       );
 
-      if (result.length <= CHARACTER_LIMIT || notes.length <= 1 || limit === 1) {
+      if (result.length <= CHARACTER_LIMIT) {
         return result;
+      }
+      if (notes.length <= 1 || limit === 1) {
+        return formatOversizedSingleNoteResponse(
+          input.companyId,
+          notes[0],
+          nextCursor,
+          input.responseFormat
+        );
       }
 
       // Re-fetch a smaller API page so omitted notes are reachable through the

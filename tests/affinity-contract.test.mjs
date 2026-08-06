@@ -178,3 +178,78 @@ test('returns a typed retry contract before the outer MCP deadline', async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test('shares one search deadline across response-size retries', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  let requestCount = 0;
+  Date.now = () => now;
+
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    now += 21_000;
+    return Response.json({
+      organizations: [
+        { id: 1, name: 'One', description: 'x'.repeat(14_000) },
+        { id: 2, name: 'Two', description: 'x'.repeat(14_000) }
+      ],
+      next_page_token: 'page-2'
+    });
+  };
+
+  try {
+    const result = JSON.parse(await executeSearchCompanies({
+      pageSize: 2,
+      responseFormat: 'json'
+    }));
+
+    assert.equal(requestCount, 1);
+    assert.equal(result.error.code, 'AFFINITY_TIMEOUT');
+    assert.equal(result.error.retryable, true);
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('keeps single oversized company and note responses valid and bounded', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes('/notes')) {
+      return Response.json({
+        data: [createNote(99, CHARACTER_LIMIT * 2)],
+        pagination: { prevUrl: null, nextUrl: null }
+      });
+    }
+    return Response.json({
+      organizations: [{
+        id: 99,
+        name: 'Oversized Company',
+        description: 'x'.repeat(CHARACTER_LIMIT * 2)
+      }],
+      next_page_token: null
+    });
+  };
+
+  try {
+    const companyRaw = await executeSearchCompanies({
+      pageSize: 1,
+      responseFormat: 'json'
+    });
+    const noteRaw = await executeListCompanyNotes({
+      companyId: '123',
+      limit: 1,
+      responseFormat: 'json'
+    });
+
+    assert.ok(companyRaw.length <= CHARACTER_LIMIT);
+    assert.ok(noteRaw.length <= CHARACTER_LIMIT);
+    assert.equal(JSON.parse(companyRaw).truncated, true);
+    assert.equal(JSON.parse(noteRaw).truncated, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -31,6 +31,7 @@ interface RateLimitInfo {
 export interface AffinityRequestOptions {
   timeoutMs?: number;
   operation?: string;
+  deadlineAtMs?: number;
 }
 
 /**
@@ -69,7 +70,12 @@ export class AffinityClientV1 {
     const url = `${API_BASE_URL}${path}`;
 
     const timeoutMs = requestOptions.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    const deadlineAtMs = requestOptions.deadlineAtMs ?? Date.now() + timeoutMs;
+    const remainingMs = Math.max(0, deadlineAtMs - Date.now());
     const operation = requestOptions.operation ?? `${options.method ?? 'GET'} ${path.split('?')[0]}`;
+    if (remainingMs === 0) {
+      throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+    }
     const requestStartedAt = Date.now();
     const requestNumber = ++this.requestCount;
     const coldStart = requestNumber === 1;
@@ -79,12 +85,12 @@ export class AffinityClientV1 {
       operation,
       timeoutMs,
       coldStart,
-      clientAgeMs: requestStartedAt - this.createdAt
+      clientAgeMs: Math.max(0, requestStartedAt - this.createdAt)
     }));
 
     // Create abort controller for timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutId = setTimeout(() => controller.abort(), Math.min(timeoutMs, remainingMs));
 
     let response: Response;
     try {
@@ -138,8 +144,14 @@ export class AffinityClientV1 {
       if (response.status === 429 && retryCount < MAX_RATE_LIMIT_RETRIES) {
         const waitMs = this.getRetryWaitTime();
         if (waitMs > 0 && waitMs < 60000) {
+          if (Date.now() + waitMs >= deadlineAtMs) {
+            throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+          }
           await this.sleep(waitMs);
-          return this.fetch<T>(path, options, retryCount + 1, requestOptions);
+          return this.fetch<T>(path, options, retryCount + 1, {
+            ...requestOptions,
+            deadlineAtMs
+          });
         }
       }
 
