@@ -13,7 +13,7 @@ import { getClient } from '../client.js';
 import { getClientV1 } from '../client-v1.js';
 import { formatError } from '../utils/errors.js';
 import { ListCompanyNotesInput, AddNoteInput } from '../schemas/inputs.js';
-import { CHARACTER_LIMIT } from '../constants.js';
+import { API_BASE_URL, CHARACTER_LIMIT } from '../constants.js';
 
 /**
  * V2 Note response type (BETA)
@@ -287,14 +287,54 @@ function formatNoteMarkdown(note: V2Note, index: number): string {
  * Extract cursor from nextUrl
  * V2 BETA uses URL-based pagination, we extract the cursor param
  */
-function extractCursorFromUrl(url: string | null): string | null {
+export function extractCursorFromUrl(url: string | null): string | null {
   if (!url) return null;
   try {
-    const urlObj = new URL(url);
+    // Affinity may return either an absolute URL or an API-relative URL.
+    const urlObj = new URL(url, API_BASE_URL);
     return urlObj.searchParams.get('cursor');
   } catch {
     return null;
   }
+}
+
+function formatCompanyNotesResponse(
+  companyId: string,
+  notes: V2Note[],
+  nextCursor: string | null,
+  responseFormat: ListCompanyNotesInput['responseFormat']
+): string {
+  const hasMore = nextCursor !== null;
+
+  if (responseFormat === 'markdown') {
+    const lines = [`# Notes for Company ${companyId}`, ''];
+
+    if (notes.length === 0) {
+      lines.push('*No notes found for this company.*');
+    } else {
+      lines.push(`Found **${notes.length}** note(s)${hasMore ? ' (more available)' : ''}`, '');
+
+      for (let index = 0; index < notes.length; index++) {
+        lines.push(formatNoteMarkdown(notes[index], index), '');
+      }
+    }
+
+    if (nextCursor) {
+      lines.push('---', `*More notes available. Use cursor: \`${nextCursor}\`*`);
+    }
+
+    return lines.join('\n');
+  }
+
+  return JSON.stringify({
+    notes,
+    count: notes.length,
+    hasMore,
+    nextCursor,
+    summary: notes.length === 0
+      ? 'No notes found for this company'
+      : `Found ${notes.length} note(s)${hasMore ? ' (more available with cursor)' : ''}`
+  }, null, 2);
 }
 
 /**
@@ -305,102 +345,40 @@ function extractCursorFromUrl(url: string | null): string | null {
 export async function executeListCompanyNotes(input: ListCompanyNotesInput): Promise<string> {
   try {
     const client = getClient();
+    let limit = input.limit ?? 20;
 
-    // Build params
-    const params: Record<string, string | number | undefined> = {};
-
-    if (input.cursor) {
-      params.cursor = input.cursor;
-    }
-    if (input.limit !== undefined) {
-      params.limit = input.limit;
-    }
-
-    const response = await client.get<V2ListNotesResponse>(
-      `/v2/companies/${input.companyId}/notes`,
-      params
-    );
-
-    const notes = response.data || [];
-    const nextCursor = extractCursorFromUrl(response.pagination?.nextUrl);
-    const hasMore = !!nextCursor;
-
-    // Format based on requested format
-    if (input.responseFormat === 'markdown') {
-      const lines: string[] = [];
-      lines.push(`# Notes for Company ${input.companyId}`);
-      lines.push('');
-
-      if (notes.length === 0) {
-        lines.push('*No notes found for this company.*');
-      } else {
-        lines.push(`Found **${notes.length}** note(s)${hasMore ? ' (more available)' : ''}`);
-        lines.push('');
-
-        for (let i = 0; i < notes.length; i++) {
-          lines.push(formatNoteMarkdown(notes[i], i));
-          lines.push('');
-        }
-      }
-
-      if (nextCursor) {
-        lines.push('---');
-        lines.push(`*More notes available. Use cursor: \`${nextCursor}\`*`);
-      }
-
-      let result = lines.join('\n');
-
-      // Truncate if needed
-      if (result.length > CHARACTER_LIMIT) {
-        const halfCount = Math.max(1, Math.floor(notes.length / 2));
-        const truncatedLines: string[] = [];
-        truncatedLines.push(`# Notes for Company ${input.companyId}`);
-        truncatedLines.push('');
-        truncatedLines.push(`**Showing ${halfCount} of ${notes.length} notes** (truncated)`);
-        truncatedLines.push('');
-
-        for (let i = 0; i < halfCount; i++) {
-          truncatedLines.push(formatNoteMarkdown(notes[i], i));
-          truncatedLines.push('');
-        }
-
-        truncatedLines.push('---');
-        truncatedLines.push('*Response truncated. Use cursor to see more notes.*');
-        result = truncatedLines.join('\n');
-      }
-
-      return result;
-    }
-
-    // JSON response
-    const result = {
-      notes,
-      count: notes.length,
-      hasMore,
-      nextCursor,
-      summary: notes.length === 0
-        ? 'No notes found for this company'
-        : `Found ${notes.length} note(s)${hasMore ? ' (more available with cursor)' : ''}`
-    };
-
-    let jsonResult = JSON.stringify(result, null, 2);
-
-    // Truncate if needed
-    if (jsonResult.length > CHARACTER_LIMIT) {
-      const halfCount = Math.max(1, Math.floor(notes.length / 2));
-      const truncatedResult = {
-        notes: notes.slice(0, halfCount),
-        count: halfCount,
-        hasMore: true,
-        nextCursor,
-        truncated: true,
-        truncatedFrom: notes.length,
-        summary: `Showing ${halfCount} of ${notes.length} notes (truncated)`
+    for (;;) {
+      // Build params
+      const params: Record<string, string | number | undefined> = {
+        limit
       };
-      jsonResult = JSON.stringify(truncatedResult, null, 2);
-    }
 
-    return jsonResult;
+      if (input.cursor) {
+        params.cursor = input.cursor;
+      }
+
+      const response = await client.get<V2ListNotesResponse>(
+        `/v2/companies/${input.companyId}/notes`,
+        params
+      );
+
+      const notes = response.data || [];
+      const nextCursor = extractCursorFromUrl(response.pagination?.nextUrl);
+      const result = formatCompanyNotesResponse(
+        input.companyId,
+        notes,
+        nextCursor,
+        input.responseFormat
+      );
+
+      if (result.length <= CHARACTER_LIMIT || notes.length <= 1 || limit === 1) {
+        return result;
+      }
+
+      // Re-fetch a smaller API page so omitted notes are reachable through the
+      // server-issued cursor instead of a local truncation with no continuation.
+      limit = Math.max(1, Math.min(limit - 1, Math.floor(notes.length / 2)));
+    }
   } catch (error) {
     return formatError(error);
   }
