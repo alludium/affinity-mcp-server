@@ -350,8 +350,7 @@ export async function executeSearchCompanies(input: SearchCompaniesInput): Promi
       if (
         result.length <= CHARACTER_LIMIT ||
         organizations.length <= 1 ||
-        pageSize === 1 ||
-        input.pageToken !== undefined
+        pageSize === 1
       ) {
         return result;
       }

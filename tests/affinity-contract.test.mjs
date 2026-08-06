@@ -7,9 +7,10 @@ const {
   executeListCompanyNotes,
   extractCursorFromUrl
 } = await import('../dist/tools/notes.js');
+const { executeSearchCompanies } = await import('../dist/tools/companies-v1.js');
 const { AffinityClientV1 } = await import('../dist/client-v1.js');
 const { AffinityTimeoutError, formatError } = await import('../dist/utils/errors.js');
-const { SEARCH_REQUEST_TIMEOUT_MS } = await import('../dist/constants.js');
+const { CHARACTER_LIMIT, SEARCH_REQUEST_TIMEOUT_MS } = await import('../dist/constants.js');
 
 function createNote(id, contentSize = 7000) {
   return {
@@ -91,6 +92,47 @@ test('re-pages more than two notes so every hasMore response has a usable cursor
     assert.deepEqual(secondPage.notes.map((note) => note.id), [3, 4]);
     assert.equal(secondPage.hasMore, false);
     assert.equal(secondPage.nextCursor, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('re-pages oversized company continuation responses while preserving a usable token', async () => {
+  const originalFetch = globalThis.fetch;
+  const companies = Array.from({ length: 4 }, (_, index) => ({
+    id: index + 1,
+    name: `Company ${index + 1}`,
+    description: 'x'.repeat(7000)
+  }));
+  const requestedPageSizes = [];
+  const requestedPageTokens = [];
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    const pageSize = Number(url.searchParams.get('page_size'));
+    requestedPageSizes.push(pageSize);
+    requestedPageTokens.push(url.searchParams.get('page_token'));
+
+    return Response.json({
+      organizations: companies.slice(0, pageSize),
+      next_page_token: 'page-3'
+    });
+  };
+
+  try {
+    const rawResult = await executeSearchCompanies({
+      pageToken: 'page-2',
+      pageSize: 4,
+      responseFormat: 'json'
+    });
+    const result = JSON.parse(rawResult);
+
+    assert.deepEqual(requestedPageSizes, [4, 2]);
+    assert.deepEqual(requestedPageTokens, ['page-2', 'page-2']);
+    assert.ok(rawResult.length <= CHARACTER_LIMIT);
+    assert.equal(result.count, 2);
+    assert.equal(result.hasMore, true);
+    assert.equal(result.nextPageToken, 'page-3');
   } finally {
     globalThis.fetch = originalFetch;
   }
