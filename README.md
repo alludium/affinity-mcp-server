@@ -601,6 +601,8 @@ The server returns clear, actionable error messages:
 
 ## Development
 
+Maintainers: follow [RELEASING.md](RELEASING.md) for the manual package release procedure.
+
 ```bash
 # Type check
 npm run typecheck
