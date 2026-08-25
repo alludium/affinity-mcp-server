@@ -34,7 +34,7 @@ Releases are deliberate and manual. Do not publish a new package version for doc
 
    Inspect the dry-run file list. It must include the built `dist/` output and the expected package metadata; do not publish if it does not.
 
-`prepack` runs `npm run build` before both `npm pack` and `npm publish`. The explicit build above is still useful as a direct build check, while the lifecycle hook protects the tarball from a stale or missing `dist/` directory.
+`prepack` clears the ignored `dist/` directory and rebuilds it before both `npm pack` and `npm publish`. The explicit build above is still useful as a direct build check, while the lifecycle hook prevents stale or missing build output from entering the tarball.
 
 ## Publish and verify the registry
 
