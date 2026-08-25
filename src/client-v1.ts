@@ -14,17 +14,24 @@
  * @see https://api-docs.affinity.co/
  */
 
-import { parseErrorResponse, AffinityApiError } from './utils/errors.js';
+import { parseErrorResponse, AffinityApiError, AffinityTimeoutError } from './utils/errors.js';
 import {
   API_BASE_URL,
   RATE_LIMIT_PER_MINUTE,
   MAX_RATE_LIMIT_RETRIES,
-  REQUEST_TIMEOUT_MS
+  REQUEST_TIMEOUT_MS,
+  TIMEOUT_RETRY_AFTER_MS
 } from './constants.js';
 
 interface RateLimitInfo {
   remaining: number;
   resetAt: Date;
+}
+
+export interface AffinityRequestOptions {
+  timeoutMs?: number;
+  operation?: string;
+  deadlineAtMs?: number;
 }
 
 /**
@@ -37,6 +44,8 @@ export class AffinityClientV1 {
     remaining: RATE_LIMIT_PER_MINUTE,
     resetAt: new Date()
   };
+  private readonly createdAt = Date.now();
+  private requestCount = 0;
 
   constructor(apiKey: string) {
     if (!apiKey) {
@@ -54,14 +63,34 @@ export class AffinityClientV1 {
   async fetch<T>(
     path: string,
     options: RequestInit = {},
-    retryCount: number = 0
+    retryCount: number = 0,
+    requestOptions: AffinityRequestOptions = {}
   ): Promise<T> {
     // V1 endpoints do NOT have /v2 prefix - they use the root path
     const url = `${API_BASE_URL}${path}`;
 
+    const timeoutMs = requestOptions.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    const deadlineAtMs = requestOptions.deadlineAtMs ?? Date.now() + timeoutMs;
+    const remainingMs = Math.max(0, deadlineAtMs - Date.now());
+    const operation = requestOptions.operation ?? `${options.method ?? 'GET'} ${path.split('?')[0]}`;
+    if (remainingMs === 0) {
+      throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+    }
+    const requestStartedAt = Date.now();
+    const requestNumber = ++this.requestCount;
+    const coldStart = requestNumber === 1;
+
+    console.error(JSON.stringify({
+      event: 'affinity_api_request_started',
+      operation,
+      timeoutMs,
+      coldStart,
+      clientAgeMs: Math.max(0, requestStartedAt - this.createdAt)
+    }));
+
     // Create abort controller for timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), Math.min(timeoutMs, remainingMs));
 
     let response: Response;
     try {
@@ -74,35 +103,70 @@ export class AffinityClientV1 {
           ...options.headers
         }
       });
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms. The Affinity API may be slow or unavailable.`);
+
+      // Update rate limit info from headers
+      this.updateRateLimitInfo(response);
+
+      if (!response.ok) {
+        const error = await this.parseV1ErrorResponse(response);
+        console.error(JSON.stringify({
+          event: 'affinity_api_request_completed',
+          operation,
+          statusCode: response.status,
+          durationMs: Date.now() - requestStartedAt,
+          coldStart
+        }));
+
+        // Handle rate limiting with retry (with max attempts)
+        if (response.status === 429 && retryCount < MAX_RATE_LIMIT_RETRIES) {
+          const waitMs = this.getRetryWaitTime();
+          if (waitMs > 0 && waitMs < 60000) {
+            if (Date.now() + waitMs >= deadlineAtMs) {
+              throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+            }
+            clearTimeout(timeoutId);
+            await this.sleep(waitMs);
+            return this.fetch<T>(path, options, retryCount + 1, {
+              ...requestOptions,
+              deadlineAtMs
+            });
+          }
+        }
+
+        throw error;
       }
+
+      const result = await response.json() as T;
+      console.error(JSON.stringify({
+        event: 'affinity_api_request_completed',
+        operation,
+        statusCode: response.status,
+        durationMs: Date.now() - requestStartedAt,
+        coldStart
+      }));
+      return result;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.error(JSON.stringify({
+          event: 'affinity_api_request_timed_out',
+          operation,
+          timeoutMs,
+          durationMs: Date.now() - requestStartedAt,
+          coldStart
+        }));
+        throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+      }
+      console.error(JSON.stringify({
+        event: 'affinity_api_request_failed',
+        operation,
+        durationMs: Date.now() - requestStartedAt,
+        coldStart,
+        errorName: error instanceof Error ? error.name : 'UnknownError'
+      }));
       throw error;
     } finally {
       clearTimeout(timeoutId);
     }
-
-    // Update rate limit info from headers
-    this.updateRateLimitInfo(response);
-
-    if (!response.ok) {
-      const error = await this.parseV1ErrorResponse(response);
-
-      // Handle rate limiting with retry (with max attempts)
-      if (response.status === 429 && retryCount < MAX_RATE_LIMIT_RETRIES) {
-        const waitMs = this.getRetryWaitTime();
-        if (waitMs > 0 && waitMs < 60000) {
-          await this.sleep(waitMs);
-          return this.fetch<T>(path, options, retryCount + 1);
-        }
-      }
-
-      throw error;
-    }
-
-    return response.json() as Promise<T>;
   }
 
   /**
@@ -111,7 +175,11 @@ export class AffinityClientV1 {
    * @param path - API path (without /v2 prefix, e.g., '/persons')
    * @param params - Query parameters
    */
-  async get<T>(path: string, params?: Record<string, string | string[] | number | boolean | undefined>): Promise<T> {
+  async get<T>(
+    path: string,
+    params?: Record<string, string | string[] | number | boolean | undefined>,
+    requestOptions: AffinityRequestOptions = {}
+  ): Promise<T> {
     const searchParams = new URLSearchParams();
 
     if (params) {
@@ -133,7 +201,7 @@ export class AffinityClientV1 {
     const queryString = searchParams.toString();
     const fullPath = queryString ? `${path}?${queryString}` : path;
 
-    return this.fetch<T>(fullPath);
+    return this.fetch<T>(fullPath, {}, 0, requestOptions);
   }
 
   /**
@@ -202,7 +270,10 @@ export class AffinityClientV1 {
           message: text || `HTTP ${response.status}: ${response.statusText}`
         });
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw error;
+      }
       return new AffinityApiError(response.status, {
         message: `HTTP ${response.status}: ${response.statusText}`
       });

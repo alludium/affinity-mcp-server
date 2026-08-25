@@ -1,6 +1,6 @@
 {
   "name": "@alludium/affinity-mcp-server",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "MCP server for Affinity CRM API",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "keywords": [
     "mcp",

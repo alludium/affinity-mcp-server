@@ -7,6 +7,20 @@ export interface AffinityErrorResponse {
   message: string;
 }
 
+export class AffinityTimeoutError extends Error {
+  public readonly code = 'AFFINITY_TIMEOUT';
+  public readonly retryable = true;
+
+  constructor(
+    public readonly operation: string,
+    public readonly timeoutMs: number,
+    public readonly retryAfterMs: number
+  ) {
+    super(`Affinity ${operation} timed out after ${timeoutMs}ms`);
+    this.name = 'AffinityTimeoutError';
+  }
+}
+
 /**
  * Custom error class for Affinity API errors
  */
@@ -82,6 +96,17 @@ export async function parseErrorResponse(response: Response): Promise<AffinityAp
  * Format any error for tool output
  */
 export function formatError(error: unknown): string {
+  if (error instanceof AffinityTimeoutError) {
+    return JSON.stringify({
+      error: {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        retryAfterMs: error.retryAfterMs,
+        guidance: 'Retry after the suggested delay. If the timeout repeats, narrow the search term.'
+      }
+    }, null, 2);
+  }
   if (error instanceof AffinityApiError) {
     return error.toUserMessage();
   }

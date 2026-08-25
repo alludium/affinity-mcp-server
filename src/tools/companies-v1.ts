@@ -16,7 +16,7 @@
 import { getClientV1 } from '../client-v1.js';
 import { formatError } from '../utils/errors.js';
 import { SearchCompaniesInput, CreateCompanyInput } from '../schemas/inputs.js';
-import { CHARACTER_LIMIT } from '../constants.js';
+import { CHARACTER_LIMIT, SEARCH_REQUEST_TIMEOUT_MS } from '../constants.js';
 
 /**
  * V1 Organization (Company) response type
@@ -263,6 +263,73 @@ function formatOrganizationMarkdown(org: V1Organization): string {
   return lines.join('\n');
 }
 
+function formatSearchCompaniesResponse(
+  organizations: V1Organization[],
+  nextPageToken: string | null,
+  responseFormat: SearchCompaniesInput['responseFormat']
+): string {
+  const hasMore = nextPageToken !== null;
+
+  if (responseFormat === 'markdown') {
+    const lines = [
+      '# Search Results: Companies',
+      '',
+      `Found **${organizations.length}** company/companies${hasMore ? ' (more available)' : ''}`,
+      ''
+    ];
+
+    for (const organization of organizations) {
+      lines.push(formatOrganizationMarkdown(organization), '');
+    }
+
+    if (nextPageToken) {
+      lines.push('---', `*More results available. Use pageToken: \`${nextPageToken}\`*`);
+    }
+
+    return lines.join('\n');
+  }
+
+  return JSON.stringify({
+    companies: organizations,
+    count: organizations.length,
+    hasMore,
+    nextPageToken,
+    summary: `Found ${organizations.length} company/companies${hasMore ? ' (more available with pageToken)' : ''}`
+  }, null, 2);
+}
+
+function formatOversizedSingleCompanyResponse(
+  organization: V1Organization,
+  nextPageToken: string | null,
+  responseFormat: SearchCompaniesInput['responseFormat']
+): string {
+  const id = String(organization.id ?? '').slice(0, 256);
+  const name = String(organization.name ?? 'Unnamed company').slice(0, 512);
+
+  if (responseFormat === 'markdown') {
+    return [
+      '# Search Results: Companies',
+      '',
+      `## ${name}`,
+      id ? `**ID:** ${id}` : '',
+      '',
+      '*This company record exceeded the response limit. Use its ID with a company detail tool to read the full record.*',
+      ...(nextPageToken
+        ? ['', `*More results available. Use pageToken: \`${nextPageToken}\`*`]
+        : [])
+    ].filter(Boolean).join('\n');
+  }
+
+  return JSON.stringify({
+    companies: [{ id, name, truncated: true }],
+    count: 1,
+    hasMore: nextPageToken !== null,
+    nextPageToken,
+    truncated: true,
+    summary: 'The company record exceeded the response limit. Use its ID to read the full record.'
+  }, null, 2);
+}
+
 /**
  * Execute search companies tool
  *
@@ -271,104 +338,64 @@ function formatOrganizationMarkdown(org: V1Organization): string {
 export async function executeSearchCompanies(input: SearchCompaniesInput): Promise<string> {
   try {
     const client = getClientV1();
+    let pageSize = input.pageSize ?? 100;
+    const deadlineAtMs = Date.now() + SEARCH_REQUEST_TIMEOUT_MS;
 
-    // Build V1 API params (snake_case)
-    const params: Record<string, string | number | boolean | undefined> = {};
-
-    if (input.term !== undefined) {
-      params.term = input.term;
-    }
-    if (input.withInteractionDates !== undefined) {
-      params.with_interaction_dates = input.withInteractionDates;
-    }
-    if (input.withInteractionPersons !== undefined) {
-      params.with_interaction_persons = input.withInteractionPersons;
-    }
-    if (input.withOpportunities !== undefined) {
-      params.with_opportunities = input.withOpportunities;
-    }
-    if (input.pageSize !== undefined) {
-      params.page_size = input.pageSize;
-    }
-    if (input.pageToken !== undefined) {
-      params.page_token = input.pageToken;
-    }
-
-    const response = await client.get<V1SearchOrganizationsResponse>('/organizations', params);
-
-    const organizations = response.organizations || [];
-    const nextPageToken = response.next_page_token || null;
-    const hasMore = !!nextPageToken;
-
-    // Format based on requested format
-    if (input.responseFormat === 'markdown') {
-      const lines: string[] = [];
-      lines.push('# Search Results: Companies');
-      lines.push('');
-      lines.push(`Found **${organizations.length}** company/companies${hasMore ? ' (more available)' : ''}`);
-      lines.push('');
-
-      for (const org of organizations) {
-        lines.push(formatOrganizationMarkdown(org));
-        lines.push('');
-      }
-
-      if (nextPageToken) {
-        lines.push('---');
-        lines.push(`*More results available. Use pageToken: \`${nextPageToken}\`*`);
-      }
-
-      let result = lines.join('\n');
-
-      // Truncate if needed
-      if (result.length > CHARACTER_LIMIT) {
-        const halfCount = Math.max(1, Math.floor(organizations.length / 2));
-        const truncatedLines: string[] = [];
-        truncatedLines.push('# Search Results: Companies');
-        truncatedLines.push('');
-        truncatedLines.push(`**Showing ${halfCount} of ${organizations.length} companies** (truncated)`);
-        truncatedLines.push('');
-
-        for (let i = 0; i < halfCount; i++) {
-          truncatedLines.push(formatOrganizationMarkdown(organizations[i]));
-          truncatedLines.push('');
-        }
-
-        truncatedLines.push('---');
-        truncatedLines.push('*Response truncated. Use pageToken or more specific search term.*');
-        result = truncatedLines.join('\n');
-      }
-
-      return result;
-    }
-
-    // JSON response - use "companies" for consistency with V2 naming
-    const result = {
-      companies: organizations,
-      count: organizations.length,
-      hasMore,
-      nextPageToken,
-      summary: `Found ${organizations.length} company/companies${hasMore ? ' (more available with pageToken)' : ''}`
-    };
-
-    let jsonResult = JSON.stringify(result, null, 2);
-
-    // Truncate if needed
-    if (jsonResult.length > CHARACTER_LIMIT) {
-      const halfCount = Math.max(1, Math.floor(organizations.length / 2));
-      const truncatedResult = {
-        companies: organizations.slice(0, halfCount),
-        count: halfCount,
-        hasMore: true,
-        nextPageToken,
-        truncated: true,
-        truncatedFrom: organizations.length,
-        summary: `Showing ${halfCount} of ${organizations.length} companies (truncated). Use pageToken or more specific search.`
+    for (;;) {
+      // Build V1 API params (snake_case)
+      const params: Record<string, string | number | boolean | undefined> = {
+        page_size: pageSize
       };
-      jsonResult = JSON.stringify(truncatedResult, null, 2);
-    }
 
-    return jsonResult;
+      if (input.term !== undefined) {
+        params.term = input.term;
+      }
+      if (input.withInteractionDates !== undefined) {
+        params.with_interaction_dates = input.withInteractionDates;
+      }
+      if (input.withInteractionPersons !== undefined) {
+        params.with_interaction_persons = input.withInteractionPersons;
+      }
+      if (input.withOpportunities !== undefined) {
+        params.with_opportunities = input.withOpportunities;
+      }
+      if (input.pageToken !== undefined) {
+        params.page_token = input.pageToken;
+      }
+
+      const response = await client.get<V1SearchOrganizationsResponse>(
+        '/organizations',
+        params,
+        {
+          operation: 'search_companies',
+          timeoutMs: SEARCH_REQUEST_TIMEOUT_MS,
+          deadlineAtMs
+        }
+      );
+
+      const organizations = response.organizations || [];
+      const nextPageToken = response.next_page_token || null;
+      const result = formatSearchCompaniesResponse(
+        organizations,
+        nextPageToken,
+        input.responseFormat
+      );
+
+      if (result.length <= CHARACTER_LIMIT) {
+        return result;
+      }
+      if (organizations.length <= 1 || pageSize === 1) {
+        return formatOversizedSingleCompanyResponse(
+          organizations[0],
+          nextPageToken,
+          input.responseFormat
+        );
+      }
+
+      // Re-fetch a smaller API page so any omitted records are represented by
+      // an Affinity-issued token accepted by the next call.
+      pageSize = Math.max(1, Math.min(pageSize - 1, Math.floor(organizations.length / 2)));
+    }
   } catch (error) {
     return formatError(error);
   }
