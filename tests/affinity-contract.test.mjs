@@ -179,6 +179,77 @@ test('returns a typed retry contract before the outer MCP deadline', async () =>
   }
 });
 
+test('keeps the timeout active while reading a successful response body', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: () => new Promise((_resolve, reject) => {
+      const fallback = setTimeout(() => reject(new Error('body read did not abort')), 100);
+      init.signal.addEventListener('abort', () => {
+        clearTimeout(fallback);
+        reject(new DOMException('The operation was aborted', 'AbortError'));
+      }, { once: true });
+    })
+  });
+
+  try {
+    const client = new AffinityClientV1('test-key');
+    const error = await client.fetch(
+      '/organizations?term=pageindex.ai',
+      {},
+      0,
+      { operation: 'search_companies', timeoutMs: 10 }
+    ).then(
+      () => null,
+      (caught) => caught
+    );
+
+    assert.ok(error instanceof AffinityTimeoutError);
+    assert.equal(error.code, 'AFFINITY_TIMEOUT');
+    assert.equal(error.timeoutMs, 10);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('keeps the timeout active while reading an error response body', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => ({
+    ok: false,
+    status: 500,
+    statusText: 'Internal Server Error',
+    headers: new Headers(),
+    text: () => new Promise((_resolve, reject) => {
+      const fallback = setTimeout(() => reject(new Error('error body read did not abort')), 100);
+      init.signal.addEventListener('abort', () => {
+        clearTimeout(fallback);
+        reject(new DOMException('The operation was aborted', 'AbortError'));
+      }, { once: true });
+    })
+  });
+
+  try {
+    const client = new AffinityClientV1('test-key');
+    const error = await client.fetch(
+      '/organizations?term=pageindex.ai',
+      {},
+      0,
+      { operation: 'search_companies', timeoutMs: 10 }
+    ).then(
+      () => null,
+      (caught) => caught
+    );
+
+    assert.ok(error instanceof AffinityTimeoutError);
+    assert.equal(error.code, 'AFFINITY_TIMEOUT');
+    assert.equal(error.timeoutMs, 10);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('shares one search deadline across response-size retries', async () => {
   const originalFetch = globalThis.fetch;
   const originalDateNow = Date.now;

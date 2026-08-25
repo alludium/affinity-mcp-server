@@ -103,8 +103,49 @@ export class AffinityClientV1 {
           ...options.headers
         }
       });
+
+      // Update rate limit info from headers
+      this.updateRateLimitInfo(response);
+
+      if (!response.ok) {
+        const error = await this.parseV1ErrorResponse(response);
+        console.error(JSON.stringify({
+          event: 'affinity_api_request_completed',
+          operation,
+          statusCode: response.status,
+          durationMs: Date.now() - requestStartedAt,
+          coldStart
+        }));
+
+        // Handle rate limiting with retry (with max attempts)
+        if (response.status === 429 && retryCount < MAX_RATE_LIMIT_RETRIES) {
+          const waitMs = this.getRetryWaitTime();
+          if (waitMs > 0 && waitMs < 60000) {
+            if (Date.now() + waitMs >= deadlineAtMs) {
+              throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
+            }
+            clearTimeout(timeoutId);
+            await this.sleep(waitMs);
+            return this.fetch<T>(path, options, retryCount + 1, {
+              ...requestOptions,
+              deadlineAtMs
+            });
+          }
+        }
+
+        throw error;
+      }
+
+      const result = await response.json() as T;
+      console.error(JSON.stringify({
+        event: 'affinity_api_request_completed',
+        operation,
+        statusCode: response.status,
+        durationMs: Date.now() - requestStartedAt,
+        coldStart
+      }));
+      return result;
     } catch (error) {
-      clearTimeout(timeoutId);
       if (error instanceof Error && error.name === 'AbortError') {
         console.error(JSON.stringify({
           event: 'affinity_api_request_timed_out',
@@ -126,39 +167,6 @@ export class AffinityClientV1 {
     } finally {
       clearTimeout(timeoutId);
     }
-
-    // Update rate limit info from headers
-    this.updateRateLimitInfo(response);
-    console.error(JSON.stringify({
-      event: 'affinity_api_request_completed',
-      operation,
-      statusCode: response.status,
-      durationMs: Date.now() - requestStartedAt,
-      coldStart
-    }));
-
-    if (!response.ok) {
-      const error = await this.parseV1ErrorResponse(response);
-
-      // Handle rate limiting with retry (with max attempts)
-      if (response.status === 429 && retryCount < MAX_RATE_LIMIT_RETRIES) {
-        const waitMs = this.getRetryWaitTime();
-        if (waitMs > 0 && waitMs < 60000) {
-          if (Date.now() + waitMs >= deadlineAtMs) {
-            throw new AffinityTimeoutError(operation, timeoutMs, TIMEOUT_RETRY_AFTER_MS);
-          }
-          await this.sleep(waitMs);
-          return this.fetch<T>(path, options, retryCount + 1, {
-            ...requestOptions,
-            deadlineAtMs
-          });
-        }
-      }
-
-      throw error;
-    }
-
-    return response.json() as Promise<T>;
   }
 
   /**
@@ -262,7 +270,10 @@ export class AffinityClientV1 {
           message: text || `HTTP ${response.status}: ${response.statusText}`
         });
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw error;
+      }
       return new AffinityApiError(response.status, {
         message: `HTTP ${response.status}: ${response.statusText}`
       });
